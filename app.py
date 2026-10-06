@@ -1,213 +1,190 @@
 import streamlit as st
-import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.stats import norm
+import numpy as np
+import math
 
-st.set_page_config(page_title="Quantitative HMM & MCMC Regime Engine", layout="wide")
+st.set_page_config(page_title="FOIL Inductive Logic Engine", layout="wide")
 
-st.title("Financial Regime Switcher: Baum-Welch, Viterbi & MCMC Calibration")
-st.caption("Module 4 (MCMC Sampling) & Module 5 (HMM, Baum-Welch, Viterbi Algorithm)")
+st.title("First-Order Inductive Learner (FOIL) Rule Synthesis")
+st.caption("Module 2: Learning First-Order Rules & Sequential Covering Algorithms")
 
-# ----------------- SIDEBAR PARAMETERS -----------------
-st.sidebar.header("1. Market Simulation Config")
-n_obs = st.sidebar.slider("Trading Days (T)", 100, 800, 300, step=50)
-vol_multiplier = st.sidebar.slider("Regime Volatility Ratio", 1.5, 6.0, 3.5, step=0.5)
+# ----------------- DOMAIN RELATIONS & PREDICATES -----------------
+# Target Concept: UnauthorizedAccess(User, Resource)
+# Background Relations: Role, ResourceTier, Location, Protocol
 
-st.sidebar.header("2. Baum-Welch (EM) Settings")
-em_iters = st.sidebar.slider("Baum-Welch Iterations", 5, 50, 20, step=5)
-tolerance = 1e-4
+DEFAULT_DATA = [
+    # User, Role, Location, Resource, Tier, Protocol, Label
+    ("alice", "intern", "office", "server_prod", "critical", "ssh", "+"),
+    ("bob", "intern", "remote", "server_prod", "critical", "http", "+"),
+    ("charlie", "engineer", "remote", "server_prod", "critical", "ssh", "-"),
+    ("david", "intern", "office", "server_dev", "standard", "http", "-"),
+    ("eve", "contractor", "remote", "server_prod", "critical", "ssh", "+"),
+    ("frank", "engineer", "office", "server_prod", "critical", "ssh", "-"),
+    ("grace", "contractor", "office", "server_dev", "standard", "http", "-"),
+    ("heidi", "intern", "remote", "server_dev", "standard", "ssh", "+"),
+    ("ivan", "contractor", "remote", "server_dev", "standard", "http", "+"),
+    ("judy", "engineer", "remote", "server_dev", "standard", "ssh", "-"),
+]
 
-st.sidebar.header("3. Module 4: MCMC Metropolis-Hastings")
-n_mcmc = st.sidebar.slider("MCMC Trace Length", 500, 4000, 1500, step=250)
-proposal_std = st.sidebar.slider("Gaussian Proposal Variance (std)", 0.01, 0.5, 0.08, step=0.01)
+COLUMNS = ["User", "Role", "Location", "Resource", "Tier", "Protocol", "Label"]
 
-# ----------------- SYNTHETIC REGIME GENERATOR -----------------
-@st.cache_data
-def generate_market_data(T, vol_ratio):
-    np.random.seed(42)
-    # 2 Hidden States: 0 = Bull/Calm (Low vol, positive drift), 1 = Bear/Stress (High vol, negative drift)
-    true_A = np.array([[0.95, 0.05], [0.10, 0.90]])
-    true_mu = [0.001, -0.002]
-    true_sigma = [0.01, 0.01 * vol_ratio]
+st.sidebar.header("1. Relational Knowledge Base")
+if "data" not in st.session_state:
+    st.session_state.data = pd.DataFrame(DEFAULT_DATA, columns=COLUMNS)
 
-    states = np.zeros(T, dtype=int)
-    returns = np.zeros(T)
-    states[0] = 0
+with st.sidebar.expander("Add Relational Fact", expanded=False):
+    with st.form("add_fact"):
+        u = st.text_input("User", "mallory")
+        r = st.selectbox("Role", ["intern", "engineer", "contractor"])
+        loc = st.selectbox("Location", ["office", "remote"])
+        res = st.selectbox("Resource", ["server_prod", "server_dev"])
+        tier = st.selectbox("Tier", ["critical", "standard"])
+        proto = st.selectbox("Protocol", ["ssh", "http"])
+        lbl = st.selectbox("Label (+ for Flagged, - for Allowed)", ["+", "-"])
+        if st.form_submit_button("Append Fact"):
+            new_row = pd.DataFrame([[u, r, loc, res, tier, proto, lbl]], columns=COLUMNS)
+            st.session_state.data = pd.concat([st.session_state.data, new_row], ignore_index=True)
+            st.rerun()
 
-    for t in range(1, T):
-        states[t] = np.random.choice([0, 1], p=true_A[states[t - 1]])
-    
-    for t in range(T):
-        returns[t] = np.random.normal(true_mu[states[t]], true_sigma[states[t]])
+# ----------------- FOIL ALGORITHM IMPLEMENTATION -----------------
+def foil_gain(p0, n0, p1, n1):
+    """Calculates FOIL Information Gain: Gain = t * (log2(p1/(p1+n1)) - log2(p0/(p0+n0)))"""
+    if p1 == 0:
+        return -float("inf")
+    info_old = math.log2(p0 / (p0 + n0)) if (p0 + n0) > 0 else 0
+    info_new = math.log2(p1 / (p1 + n1)) if (p1 + n1) > 0 else 0
+    gain = p1 * (info_new - info_old)
+    return gain
 
-    prices = 100 * np.exp(np.cumsum(returns))
-    return returns, prices, states, true_mu, true_sigma, true_A
+def run_foil(df):
+    """Sequential covering algorithm searching for first-order body literals."""
+    feature_cols = ["Role", "Location", "Tier", "Protocol"]
+    pos_df = df[df["Label"] == "+"].copy()
+    neg_df = df[df["Label"] == "-"].copy()
 
-returns, prices, true_states, true_mu, true_sigma, true_A = generate_market_data(n_obs, vol_multiplier)
+    learned_rules = []
+    rule_metrics = []
 
-# ----------------- MODULE 5: HMM (BAUM-WELCH & VITERBI) -----------------
-class GaussianHMM:
-    def __init__(self, n_states=2):
-        self.K = n_states
-        self.pi = np.array([0.5, 0.5])
-        self.A = np.array([[0.9, 0.1], [0.2, 0.8]])
-        self.mu = np.array([0.002, -0.002])
-        self.sigma = np.array([0.01, 0.03])
+    # Sequential Covering: Loop until all positive examples are covered
+    remaining_pos = pos_df.copy()
 
-    def emission_prob(self, x):
-        T = len(x)
-        B = np.zeros((self.K, T))
-        for k in range(self.K):
-            B[k, :] = norm.pdf(x, self.mu[k], np.maximum(self.sigma[k], 1e-4)) + 1e-12
-        return B
+    while len(remaining_pos) > 0:
+        current_rule_literals = []
+        current_pos = remaining_pos.copy()
+        current_neg = neg_df.copy()
 
-    def forward_backward(self, x):
-        T = len(x)
-        B = self.emission_prob(x)
-        alpha = np.zeros((self.K, T))
-        beta = np.zeros((self.K, T))
-        scale = np.zeros(T)
+        # Build single clause body
+        while len(current_neg) > 0:
+            best_literal = None
+            best_gain = -float("inf")
+            best_pos_split = None
+            best_neg_split = None
 
-        # Forward
-        alpha[:, 0] = self.pi * B[:, 0]
-        scale[0] = np.sum(alpha[:, 0]) + 1e-12
-        alpha[:, 0] /= scale[0]
+            p0 = len(current_pos)
+            n0 = len(current_neg)
 
-        for t in range(1, T):
-            alpha[:, t] = (self.A.T @ alpha[:, t - 1]) * B[:, t]
-            scale[t] = np.sum(alpha[:, t]) + 1e-12
-            alpha[:, t] /= scale[t]
+            # Evaluate candidate literals Predicate(Var, Value)
+            for col in feature_cols:
+                values = df[col].unique()
+                for val in values:
+                    candidate_literal = f"{col}(X, '{val}')"
+                    if candidate_literal in current_rule_literals:
+                        continue
 
-        # Backward
-        beta[:, -1] = 1.0 / scale[-1]
-        for t in range(T - 2, -1, -1):
-            beta[:, t] = (self.A @ (beta[:, t + 1] * B[:, t + 1])) / scale[t]
+                    cand_pos = current_pos[current_pos[col] == val]
+                    cand_neg = current_neg[current_neg[col] == val]
 
-        gamma = alpha * beta
-        gamma /= np.sum(gamma, axis=0, keepdims=True)
+                    p1 = len(cand_pos)
+                    n1 = len(cand_neg)
 
-        xi = np.zeros((self.K, self.K, T - 1))
-        for t in range(T - 1):
-            denom = np.sum(alpha[:, t, None] * self.A * B[:, t + 1] * beta[:, t + 1]) + 1e-12
-            xi[:, :, t] = (alpha[:, t, None] * self.A * B[:, t + 1] * beta[:, t + 1]) / denom
+                    if p1 == 0:
+                        continue
 
-        return alpha, beta, gamma, xi
+                    gain = foil_gain(p0, n0, p1, n1)
 
-    def fit_baum_welch(self, x, iterations):
-        T = len(x)
-        for _ in range(iterations):
-            alpha, beta, gamma, xi = self.forward_backward(x)
-            self.pi = gamma[:, 0]
-            self.A = np.sum(xi, axis=2) / (np.sum(gamma[:, :-1], axis=1)[:, None] + 1e-12)
-            self.A /= np.sum(self.A, axis=1, keepdims=True)
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_literal = candidate_literal
+                        best_pos_split = cand_pos
+                        best_neg_split = cand_neg
 
-            for k in range(self.K):
-                gamma_k = gamma[k, :]
-                w_sum = np.sum(gamma_k) + 1e-12
-                self.mu[k] = np.sum(gamma_k * x) / w_sum
-                self.sigma[k] = np.sqrt(np.sum(gamma_k * (x - self.mu[k])**2) / w_sum)
+            if best_literal is None or best_gain <= 0:
+                # If no positive gain possible, break to avoid infinite loop
+                break
 
-    def viterbi(self, x):
-        T = len(x)
-        B = self.emission_prob(x)
-        delta = np.zeros((self.K, T))
-        psi = np.zeros((self.K, T), dtype=int)
+            current_rule_literals.append(best_literal)
+            current_pos = best_pos_split
+            current_neg = best_neg_split
 
-        delta[:, 0] = np.log(self.pi + 1e-12) + np.log(B[:, 0])
-        for t in range(1, T):
-            for j in range(self.K):
-                seq_probs = delta[:, t - 1] + np.log(self.A[:, j] + 1e-12)
-                psi[j, t] = np.argmax(seq_probs)
-                delta[j, t] = np.max(seq_probs) + np.log(B[j, t])
+            if len(current_neg) == 0:
+                break
 
-        best_path = np.zeros(T, dtype=int)
-        best_path[-1] = np.argmax(delta[:, -1])
-        for t in range(T - 2, -1, -1):
-            best_path[t] = psi[best_path[t + 1], t + 1]
-        return best_path
+        if not current_rule_literals:
+            break
 
-hmm = GaussianHMM(n_states=2)
-hmm.fit_baum_welch(returns, em_iters)
-inferred_states = hmm.viterbi(returns)
+        rule_str = "UnauthorizedAccess(X, Y) :- " + ", ".join(current_rule_literals)
+        covered_indices = current_pos.index
+        learned_rules.append(rule_str)
+        rule_metrics.append((len(current_pos), len(current_neg)))
 
-# Correct potential label flipping based on volatility scale
-if hmm.sigma[0] > hmm.sigma[1]:
-    inferred_states = 1 - inferred_states
+        # Remove covered positive examples (Sequential Covering)
+        remaining_pos = remaining_pos.drop(index=covered_indices, errors="ignore")
 
-# ----------------- MODULE 4: MCMC METROPOLIS-HASTINGS SAMPLER -----------------
-def run_mcmc(data, states, n_samples, prop_std):
-    # Sample posterior distribution of Bear-State volatility: P(sigma_bear | observations)
-    bear_data = data[states == 1]
-    if len(bear_data) < 5:
-        bear_data = data  # Fallback
+    return learned_rules, rule_metrics
 
-    samples = np.zeros(n_samples)
-    curr_sigma = np.std(bear_data)
-    samples[0] = curr_sigma
+# ----------------- INFERENCE ENGINE -----------------
+def evaluate_rules(rules, query_dict):
+    """Evaluates whether an unseen access request satisfies any learned Horn clause."""
+    fired_rules = []
+    for r in rules:
+        body = r.split(":- ")[1]
+        literals = [lit.strip() for lit in body.split(", ")]
+        match = True
+        for lit in literals:
+            col, val = lit.split("(X, '")
+            val = val.rstrip("')")
+            if query_dict.get(col) != val:
+                match = False
+                break
+        if match:
+            fired_rules.append(r)
+    return fired_rules
 
-    def log_target(s):
-        if s <= 0:
-            return -np.inf
-        # Gaussian log-likelihood with Half-Cauchy prior for scale
-        ll = np.sum(norm.logpdf(bear_data, loc=np.mean(bear_data), scale=s))
-        l_prior = -np.log(1.0 + (s / 0.05)**2)
-        return ll + l_prior
+# ----------------- UI / WORKSPACE -----------------
+st.subheader("1. Active Knowledge Base Facts")
+st.dataframe(st.session_state.data, use_container_width=True)
 
-    curr_ll = log_target(curr_sigma)
-    accepted = 0
+st.subheader("2. Inductive Logic Rule Synthesis")
+rules, metrics = run_foil(st.session_state.data)
 
-    for i in range(1, n_samples):
-        candidate = curr_sigma + np.random.normal(0, prop_std)
-        cand_ll = log_target(candidate)
-        alpha = np.exp(cand_ll - curr_ll)
+if rules:
+    for idx, (rule, (pos_cov, neg_cov)) in enumerate(zip(rules, metrics)):
+        st.success(f"**Clause {idx + 1}:** `{rule}`  \n*(Covers {pos_cov} Positive Facts, {neg_cov} Negative Facts)*")
+else:
+    st.warning("No clauses could be induced. Ensure balanced positive/negative examples.")
 
-        if np.random.rand() < alpha:
-            curr_sigma = candidate
-            curr_ll = cand_ll
-            accepted += 1
-        samples[i] = curr_sigma
+st.divider()
 
-    return samples[int(n_samples * 0.2):], accepted / n_samples
-
-mcmc_samples, acceptance_rate = run_mcmc(returns, inferred_states, n_mcmc, proposal_std)
-
-# ----------------- UI / PLOTS -----------------
+# ----------------- REAL-WORLD TEST BENCH -----------------
+st.subheader("3. Zero-Trust Access Request Inspector")
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Learned Low-Vol (Bull)", f"{np.min(hmm.sigma):.4f}")
-col2.metric("Learned High-Vol (Bear)", f"{np.max(hmm.sigma):.4f}")
-col3.metric("MCMC Posterior Mean (Bear)", f"{np.mean(mcmc_samples):.4f}")
-col4.metric("MCMC Proposal Acceptance", f"{acceptance_rate * 100:.1f}%")
+test_role = col1.selectbox("Query Role", ["intern", "engineer", "contractor"])
+test_loc = col2.selectbox("Query Location", ["office", "remote"])
+test_tier = col3.selectbox("Query Tier", ["critical", "standard"])
+test_proto = col4.selectbox("Query Protocol", ["ssh", "http"])
 
-st.subheader("1. Inferred Hidden Regimes (Viterbi Path vs Asset Price)")
-fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+query_sample = {
+    "Role": test_role,
+    "Location": test_loc,
+    "Tier": test_tier,
+    "Protocol": test_proto
+}
 
-ax1.plot(prices, color="black", label="Asset Price (Synthetic Index)")
-bear_mask = (inferred_states == 1)
-ax1.fill_between(range(n_obs), np.min(prices), np.max(prices), where=bear_mask, color='crimson', alpha=0.25, label="High-Risk Bear Regime")
-ax1.set_ylabel("Price")
-ax1.legend(loc="upper left")
-ax1.grid(True, linestyle=":", alpha=0.6)
-
-ax2.plot(returns, color="royalblue", alpha=0.7, label="Log Returns")
-ax2.set_ylabel("Returns")
-ax2.set_xlabel("Trading Days")
-ax2.grid(True, linestyle=":", alpha=0.6)
-st.pyplot(fig1)
-
-st.subheader("2. Markov Chain Monte Carlo: Posterior Volatility Distribution")
-fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(11, 4))
-
-ax3.plot(mcmc_samples, color="teal", alpha=0.8)
-ax3.set_title("MCMC Trace Plot (Convergence Verification)")
-ax3.set_xlabel("Iteration (Post-Burn-in)")
-ax3.set_ylabel(r"Parameter $\sigma_{bear}$")
-ax3.grid(True, linestyle=":", alpha=0.6)
-
-ax4.hist(mcmc_samples, bins=30, density=True, color="teal", alpha=0.6, edgecolor="black")
-ax4.axvline(np.mean(mcmc_samples), color="red", linestyle="--", label=f"Posterior Mean: {np.mean(mcmc_samples):.4f}")
-ax4.set_title(r"Posterior Density $P(\sigma_{bear} | D)$")
-ax4.set_xlabel(r"Estimated $\sigma_{bear}$")
-ax4.legend()
-ax4.grid(True, linestyle=":", alpha=0.6)
-st.pyplot(fig2)
+if st.button("Evaluate Access Security", type="primary"):
+    matched = evaluate_rules(rules, query_sample)
+    if matched:
+        st.error("🚨 ACCESS DENIED: Triggered Security Violation Horn Clause(s):")
+        for m in matched:
+            st.code(m, language="prolog")
+    else:
+        st.success("✅ ACCESS GRANTED: Request satisfies safe operational predicates.")
