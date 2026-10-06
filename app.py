@@ -132,22 +132,34 @@ def run_foil(df):
 
     return learned_rules, rule_metrics
 
+import re
+
 # ----------------- INFERENCE ENGINE -----------------
 def evaluate_rules(rules, query_dict):
     """Evaluates whether an unseen access request satisfies any learned Horn clause."""
     fired_rules = []
+    # Regex to robustly capture Predicate and Value from: Predicate(Var, 'Value') or Predicate(Var, Value)
+    pattern = re.compile(r"(\w+)\s*\(\s*\w+\s*,\s*['\"]?([^'\")]+)['\"]?\s*\)")
+
     for r in rules:
+        if ":- " not in r:
+            continue
         body = r.split(":- ")[1]
-        literals = [lit.strip() for lit in body.split(", ")]
+        literals = [lit.strip() for lit in body.split(",")]
         match = True
+
         for lit in literals:
-            col, val = lit.split("(X, '")
-            val = val.rstrip("')")
+            m = pattern.search(lit)
+            if not m:
+                continue
+            col, val = m.group(1), m.group(2)
             if query_dict.get(col) != val:
                 match = False
                 break
-        if match:
+
+        if match and len(literals) > 0:
             fired_rules.append(r)
+
     return fired_rules
 
 # ----------------- UI / WORKSPACE -----------------
